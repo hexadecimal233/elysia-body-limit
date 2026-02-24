@@ -1,0 +1,60 @@
+{
+  "name": "elysia-body-limit",
+  "version": "0.0.0",
+  "description": "Add body size limits for Elysia!!",
+  "author": {
+    "name": "Hexzii",
+    "url": "https://nichijou.moe"
+  },
+  "homepage": "https://github.com/hexadecimal233/elysia-body-limit",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hexadecimal233/elysia-body-limit.git"
+  },
+  "bugs": "https://github.com/hexadecimal233/elysia-body-limit/issues",
+  "license": "MIT",
+  "keywords": [
+    "elysia",
+    "elysiajs",
+    "bun",
+    "body-limit",
+    "payload-limit",
+    "request-size",
+    "middleware",
+    "typescript",
+    "security",
+    "max-size"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "prepublishOnly": "bun run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.4",
+    "@changesets/cli": "^2.29.8",
+    "@types/bun": "latest",
+    "tsdown": "^0.20.3"
+  },
+  "peerDependencies": {
+    "elysia": "^1",
+    "typescript": "^5"
+  }
+}
