@@ -9,7 +9,7 @@
   "homepage": "https://github.com/hexadecimal233/elysia-body-limit",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hexadecimal233/elysia-body-limit.git"
+    "url": "https://github.com/hexadecimal233/elysia-body-limit"
   },
   "bugs": "https://github.com/hexadecimal233/elysia-body-limit/issues",
   "license": "MIT",
