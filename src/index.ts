@@ -70,11 +70,9 @@ export interface ElysiaBodyLimitOptions {
   onError?: (ctx: PreContext) => ElysiaCustomStatusResponse<any, any, any>
 }
 
-const defaultBlacklist = ["", "application/json", "application/x-www-form-urlencoded"]
-
 const defaultOptions = {
   validateBunConfig: true,
-  bodyCheckBlacklist: defaultBlacklist,
+  bodyCheckBlacklist: [],
   onError: (ctx) => {
     return ctx.status(413)
   },
