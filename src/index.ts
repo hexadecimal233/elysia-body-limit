@@ -1,5 +1,5 @@
 /** biome-ignore-all lint/complexity/useLiteralKeys: bypass private */
-import Elysia, { type ElysiaCustomStatusResponse, ElysiaStatus, type PreContext } from "elysia"
+import Elysia, { ElysiaStatus, type PreContext } from "elysia"
 import type { FileUnit } from "elysia/type-system/types"
 import { parseFileUnit } from "elysia/type-system/utils"
 
@@ -13,7 +13,7 @@ export interface ElysiaBodyLimitOptions {
    * * Supports Elysia file unit.
    * @example 2 * 1024 (2MB), "10m" (10MB)
    */
-  maxSize?: FileUnit
+  maxSize: FileUnit
   /**
    * Whether to validate against Bun's maxRequestBodySize (Default 128MB)
    * @default true
@@ -32,16 +32,27 @@ export interface ElysiaBodyLimitOptions {
    */
   bodyCheck?: boolean // This may cause slight performance impacts.
   /**
-   * Content types to skip body check.
+   * Content types to SKIP body check.
    *
    * * Request without Content-Type will be treated as `""`.
+   * * Content-Type after `;` will be ignored.
    *
    * @default []
    * @example ["", "application/json", "application/x-www-form-urlencoded"]
    */
   bodyCheckBlacklist?: string[]
   /**
-   * The error handler when strictContentLength is triggered.
+   * Content types to ONLY perform body check.
+   *
+   * * Request without Content-Type will be treated as `""`.
+   * * Content-Type after `;` will be ignored.
+   *
+   * @default unset (Capture all requests)
+   * @example ["application/json", "application/x-www-form-urlencoded"]
+   */
+  bodyCheckWhitelist?: string[] // TODO: add defaults
+  /**
+   * The handler when strictContentLength is triggered.
    *
    * * Returns HTTP 411 (Length Required) by default.
    *
@@ -51,11 +62,12 @@ export interface ElysiaBodyLimitOptions {
    *    return ctx.status(411)
    * }
    * ```
+   * @returns Response, ElysiaCustomStatusResponse
    */
   // biome-ignore lint/suspicious/noExplicitAny: any
-  onLengthRequired?: (ctx: PreContext) => ElysiaCustomStatusResponse<any, any, any>
+  onLengthRequired?: (ctx: PreContext) => any
   /**
-   * The error handler when Body Limit is triggered.
+   * The handler when Body Limit is triggered.
    *
    * * Returns HTTP 413 (Payload Too Large) by default.
    *
@@ -65,21 +77,23 @@ export interface ElysiaBodyLimitOptions {
    *    return ctx.status(413)
    * }
    * ```
+   * @returns Response, ElysiaCustomStatusResponse
    */
   // biome-ignore lint/suspicious/noExplicitAny: any
-  onError?: (ctx: PreContext) => ElysiaCustomStatusResponse<any, any, any>
+  onLimit?: (ctx: PreContext) => any
 }
+
+const BUN_MAX_SIZE = 128 * 1024 * 1024 // 128MB
 
 const defaultOptions = {
   validateBunConfig: true,
-  bodyCheckBlacklist: [],
-  onError: (ctx) => {
+  onLimit: (ctx) => {
     return ctx.status(413)
   },
   onLengthRequired: (ctx) => {
     return ctx.status(411)
   },
-} as const satisfies ElysiaBodyLimitOptions
+} as const satisfies Omit<ElysiaBodyLimitOptions, "maxSize">
 
 /**
  * Body Limit Plugin for Elysia.
@@ -105,8 +119,6 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
       ...userOptions,
     }
 
-    const maxSize = options.maxSize ? parseFileUnit(options.maxSize) : undefined
-
     // Get Root elysia config
     const getRootAppCfg = (app: Elysia) => {
       let current = app
@@ -118,55 +130,19 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
       return current.config
     }
 
-    // Precompile size checker
-    const createShouldFailure = () => {
-      const hasMax = typeof maxSize === "number"
-
-      return (size: number) => {
-        if (hasMax && size > maxSize) return true
-        return false
-      }
-    }
-
-    const shouldFailure = createShouldFailure()
-
-    // Pipe the stream for unknow requests
-    const transformBody = (ctx: PreContext) => {
-      if (!ctx.request.body) return
-
-      const contentType = ctx.request.headers.get("content-type")
-
-      if (options.bodyCheck) {
-        if (options.bodyCheckBlacklist.includes(contentType ?? "")) {
-          /* skip check */
-        } else {
-          let received = 0
-
-          const transformStream = new TransformStream({
-            transform(chunk, controller) {
-              received += chunk.length
-              if (shouldFailure(received)) {
-                const e = options.onError(ctx) // User handles, error throws in PARSE stage.
-                controller.error(e)
-                return
-              }
-              controller.enqueue(chunk)
-            },
-          })
-
-          ctx.request = new Request(ctx.request, {
-            body: ctx.request.body.pipeThrough(transformStream),
-            duplex: "half",
-          })
-        }
-      }
-    }
+    const blacklist = new Set(options.bodyCheckBlacklist || [])
+    const whitelist = new Set(options.bodyCheckWhitelist || [])
+    const bodyCheck = !!options.bodyCheck
+    const strictContentLength = !!options.strictContentLength
+    const maxSize = parseFileUnit(options.maxSize)
+    const onLengthRequired = options.onLengthRequired
+    const onLimit = options.onLimit
 
     // Validate Bun settings
     if (options.validateBunConfig) {
       const cfg = getRootAppCfg(app)
-      const reqMaxSize = cfg.serve?.maxRequestBodySize ?? 128 * 1024 * 1024 // 128MB default
-      if (maxSize && maxSize >= reqMaxSize) {
+      const reqMaxSize = cfg.serve?.maxRequestBodySize ?? BUN_MAX_SIZE
+      if (maxSize > reqMaxSize) {
         throw new Error(
           `Your ElysiaBodyLimitOptions.maxSize (${options.maxSize}) is larger than your Bun maxRequestBodySize (${reqMaxSize})!`,
         )
@@ -176,32 +152,88 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
     return (
       app
         .onError(({ error, code }) => {
-          if (code === "PARSE" && error.cause instanceof ElysiaStatus) return error.cause // sus, elysia simply throws it?!
+          // sus, elysia simply throws it?!
+          if (
+            code === "PARSE" &&
+            (error.cause instanceof ElysiaStatus || error.cause instanceof Response)
+          )
+            return error.cause
         })
-        // Elysia does not throw ElysiaCustomStatusResponse inside parse hooks somehow, so macros aren't viable at this point.
-        .onRequest(async (ctx) => {
-          const { request } = ctx
+        // Elysia does not throw ElysiaCustomStatusResponse inside parse hooks / parser somehow,
+        // Only onParse can throw, so macros aren't viable at this point.
+        // ~~Elysia pre-parses Content-Type for us and removes stuff after semicolon.~~ this cause heavy performance downgrade
+        .onRequest((ctx) => {
+          const req = ctx.request
+          const headers = req.headers
 
-          if (!request.body) return // Skip Bodyless requests
+          // According to Fetch spec, GET/HEAD usually have no body. (But Bun.serve already handles that)
+          // Skip Bodyless requests
+          if (!req.body) return
 
-          const hasTransferEncoding = request.headers.has("transfer-encoding")
+          const transferEncoding = headers.get("transfer-encoding")
+          const length = headers.get("content-length")
+          const type = headers.get("content-type") || ""
 
-          // Check Transfer Encoding first
-          if (!hasTransferEncoding) {
+          // Normalize content-type without substring/indexOf
+          // RFC 7231: type/subtype; parameters are optional
+          // We only need the type/subtype part.
+          const semicolon = type.indexOf(";")
+          const contentType = semicolon === -1 ? type : type.slice(0, semicolon)
+
+          // Non-chunked requests (Content-Length path)
+          if (!transferEncoding) {
             // In Bun.serve, body will be dropped (RFC 9112), so !length may never be triggered.
-            const length = request.headers.get("content-length") // RFC 9110 -- Skip
+            // check for null/empty length
             if (!length) {
-              if (options.strictContentLength) {
-                return options.onLengthRequired(ctx)
+              if (strictContentLength) {
+                return onLengthRequired(ctx) // undefined => pass
               }
-              // Header check of the Content-Length
-            } else if (shouldFailure(+length)) {
-              return options.onError(ctx)
+              // Content beyond length will be dropped by Bun, and return an error
+              // But in debug environments we will be able to pass body without Content-Length
+              return
             }
-            // Content beyond length will be dropped by Bun, and return a 404
+            // auto compare and handles NaN, Header check of the Content-Length
+            if (+length > maxSize) {
+              return onLimit(ctx) // undefined => pass
+            } else {
+              // Continue (Bun.serve automatically handles Malformed content-length and treat as a new request)
+              return
+            }
           }
 
-          transformBody(ctx)
+          // Chunked requests (Transfer-Encoding present)
+          if (!bodyCheck) return // bodyCheck disabled → skip all checks
+
+          // Blacklist: skip checking
+          if (blacklist.has(contentType)) return
+
+          // Whitelist: if whitelist exists and contentType not in it → skip// Whitelist: if whitelist exists and contentType not in it → skip
+          if (whitelist.size > 0 && !whitelist.has(contentType)) return
+
+          // Pipe the stream for unknow requests (Slow path)
+          let received = 0
+
+          const sizeChecker = new TransformStream(
+            {
+              transform(chunk, controller) {
+                received += chunk.length
+                if (received > maxSize) {
+                  const e = onLimit(ctx)
+                  if (e) {
+                    controller.error(e)
+                    return
+                  }
+                }
+                controller.enqueue(chunk)
+              },
+            },
+            { highWaterMark: 1024 * 1024 }, // 1MB should be fast enough
+          )
+
+          ctx.request = new Request(req, {
+            body: req.body.pipeThrough(sizeChecker),
+            duplex: "half",
+          })
         })
     )
   }
