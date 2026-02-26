@@ -1,5 +1,17 @@
 # elysia-body-limit
 
+## 1.1.0
+
+### Minor Changes
+
+- b7f452d: - Add whitelist.
+
+  - Now defaults to bodycheck everything when unset.
+
+  - `maxSize` is no longer optional.
+
+  - Optimizations.
+
 ## 1.0.1
 
 ### Patch Changes
