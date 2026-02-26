@@ -2,10 +2,10 @@
 "elysia-body-limit": minor
 ---
 
-Add whitelist.
+- Add whitelist.
 
 - Now defaults to bodycheck everything when unset.
 
-`maxSize` is no longer optional.
+- `maxSize` is no longer optional.
 
-Optimizations.
+- Optimizations.

@@ -1,5 +1,10 @@
 /** biome-ignore-all lint/complexity/useLiteralKeys: bypass private */
-import Elysia, { ElysiaStatus, type PreContext } from "elysia"
+import Elysia, {
+  type Context,
+  type ElysiaCustomStatusResponse,
+  ElysiaStatus,
+  type LifeCycleType,
+} from "elysia"
 import type { FileUnit } from "elysia/type-system/types"
 import { parseFileUnit } from "elysia/type-system/utils"
 
@@ -15,6 +20,13 @@ export interface ElysiaBodyLimitOptions {
    */
   maxSize: FileUnit
   /**
+   * The effect scope onto the elysia instance.
+   *
+   * * Setting as "local" prevents the request from being handled by other instances.
+   * @default "local"
+   */
+  scope?: LifeCycleType
+  /**
    * Whether to validate against Bun's maxRequestBodySize (Default 128MB)
    * @default true
    */
@@ -28,6 +40,8 @@ export interface ElysiaBodyLimitOptions {
   strictContentLength?: boolean
   /**
    * Whether to detect body data (works with `Transfer-Encoding`, failed matches as well)
+   *
+   * * Body check will never work if the body is never consumed.
    * @default false
    */
   bodyCheck?: boolean // This may cause slight performance impacts.
@@ -37,8 +51,8 @@ export interface ElysiaBodyLimitOptions {
    * * Request without Content-Type will be treated as `""`.
    * * Content-Type after `;` will be ignored.
    *
-   * @default []
-   * @example ["", "application/json", "application/x-www-form-urlencoded"]
+   * @default unset
+   * @example ["application/json", "application/x-www-form-urlencoded"]
    */
   bodyCheckBlacklist?: string[]
   /**
@@ -48,9 +62,9 @@ export interface ElysiaBodyLimitOptions {
    * * Content-Type after `;` will be ignored.
    *
    * @default unset (Capture all requests)
-   * @example ["application/json", "application/x-www-form-urlencoded"]
+   * @example ["application/form-data"]
    */
-  bodyCheckWhitelist?: string[] // TODO: add defaults
+  bodyCheckWhitelist?: string[]
   /**
    * The handler when strictContentLength is triggered.
    *
@@ -65,7 +79,7 @@ export interface ElysiaBodyLimitOptions {
    * @returns Response, ElysiaCustomStatusResponse
    */
   // biome-ignore lint/suspicious/noExplicitAny: any
-  onLengthRequired?: (ctx: PreContext) => any
+  onLengthRequired?: (ctx: Context) => ElysiaCustomStatusResponse<any, any, any>
   /**
    * The handler when Body Limit is triggered.
    *
@@ -80,20 +94,23 @@ export interface ElysiaBodyLimitOptions {
    * @returns Response, ElysiaCustomStatusResponse
    */
   // biome-ignore lint/suspicious/noExplicitAny: any
-  onLimit?: (ctx: PreContext) => any
+  onLimit?: (ctx: Context) => any
 }
 
 const BUN_MAX_SIZE = 128 * 1024 * 1024 // 128MB
 
-const defaultOptions = {
-  validateBunConfig: true,
-  onLimit: (ctx) => {
-    return ctx.status(413)
-  },
-  onLengthRequired: (ctx) => {
-    return ctx.status(411)
-  },
-} as const satisfies Omit<ElysiaBodyLimitOptions, "maxSize">
+const getDefaultOptions = () => {
+  return {
+    validateBunConfig: true,
+    scope: "local",
+    onLimit: (ctx) => {
+      return ctx.status(413)
+    },
+    onLengthRequired: (ctx) => {
+      return ctx.status(411)
+    },
+  } as const satisfies Omit<ElysiaBodyLimitOptions, "maxSize">
+}
 
 /**
  * Body Limit Plugin for Elysia.
@@ -115,7 +132,7 @@ const defaultOptions = {
 export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
   return (app: Elysia) => {
     const options = {
-      ...defaultOptions,
+      ...getDefaultOptions(),
       ...userOptions,
     }
 
@@ -159,12 +176,23 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
           )
             return error.cause
         })
-        // Elysia does not throw ElysiaCustomStatusResponse inside parse hooks / parser somehow,
-        // Only onParse can throw, so macros aren't viable at this point.
-        // ~~Elysia pre-parses Content-Type for us and removes stuff after semicolon.~~ this cause heavy performance downgrade
-        .onRequest((ctx) => {
+        // Elysia does not throw ElysiaCustomStatusResponse inside parse hooks / parser somehow (Only Parse Error)
+        // Only onParse can throw, so macros aren't viable at this point. (Performance alert)
+        .onParse({ as: options.scope }, (ctx) => {
           const req = ctx.request
           const headers = req.headers
+
+          // Elysia pre-parses Content-Type for us.
+          // Normalize content-type without substring/indexOf
+          // RFC 7231: type/subtype; parameters are optional
+          // We only need the type/subtype part.
+          const contentType = ctx.contentType
+
+          // Blacklist: skip checking
+          if (blacklist.has(contentType)) return
+
+          // Whitelist: if whitelist exists and contentType not in it → skip
+          if (whitelist.size > 0 && !whitelist.has(contentType)) return
 
           // According to Fetch spec, GET/HEAD usually have no body. (But Bun.serve already handles that)
           // Skip Bodyless requests
@@ -172,13 +200,6 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
 
           const transferEncoding = headers.get("transfer-encoding")
           const length = headers.get("content-length")
-          const type = headers.get("content-type") || ""
-
-          // Normalize content-type without substring/indexOf
-          // RFC 7231: type/subtype; parameters are optional
-          // We only need the type/subtype part.
-          const semicolon = type.indexOf(";")
-          const contentType = semicolon === -1 ? type : type.slice(0, semicolon)
 
           // Non-chunked requests (Content-Length path)
           if (!transferEncoding) {
@@ -186,7 +207,8 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
             // check for null/empty length
             if (!length) {
               if (strictContentLength) {
-                return onLengthRequired(ctx) // undefined => pass
+                const e = onLengthRequired(ctx as Context)
+                if (e) throw e // undefined => pass
               }
               // Content beyond length will be dropped by Bun, and return an error
               // But in debug environments we will be able to pass body without Content-Length
@@ -194,7 +216,8 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
             }
             // auto compare and handles NaN, Header check of the Content-Length
             if (+length > maxSize) {
-              return onLimit(ctx) // undefined => pass
+              const e = onLimit(ctx as Context)
+              if (e) throw e // undefined => pass
             } else {
               // Continue (Bun.serve automatically handles Malformed content-length and treat as a new request)
               return
@@ -204,12 +227,6 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
           // Chunked requests (Transfer-Encoding present)
           if (!bodyCheck) return // bodyCheck disabled → skip all checks
 
-          // Blacklist: skip checking
-          if (blacklist.has(contentType)) return
-
-          // Whitelist: if whitelist exists and contentType not in it → skip// Whitelist: if whitelist exists and contentType not in it → skip
-          if (whitelist.size > 0 && !whitelist.has(contentType)) return
-
           // Pipe the stream for unknow requests (Slow path)
           let received = 0
 
@@ -218,7 +235,7 @@ export function bodyLimit(userOptions: ElysiaBodyLimitOptions) {
               transform(chunk, controller) {
                 received += chunk.length
                 if (received > maxSize) {
-                  const e = onLimit(ctx)
+                  const e = onLimit(ctx as Context) // undefined => pass
                   if (e) {
                     controller.error(e)
                     return
